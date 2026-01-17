@@ -1,6 +1,7 @@
 # 入力データの役割
 
 `Simulation/create_FVM.py` は以下の pickle を読み込みます。
+列一覧の詳細は `docs/DATA_COLUMNS.md` を参照してください。
 
 ## 必須ファイル
 - `race_class_df_update.pickle`
@@ -37,4 +38,3 @@
 ## 置き場所
 既定では `Data/ml_data` を参照します。別パスに置く場合は
 `FVM_DATASET_DIR` で明示してください。
-
