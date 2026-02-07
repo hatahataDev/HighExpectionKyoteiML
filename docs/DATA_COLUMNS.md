@@ -11,11 +11,15 @@
 ---
 
 ## race_class_df_update.pickle
-※ `create_FVM.py` では読み込みのみで **参照されていません**（列は未使用）。
+`create_FVM.py` では `race_id`（index）で参照し、`RaceDistance` から `race_distance_m` を生成します。
 
 | 列名 | 使われ方 | 補足 |
 |---|---|---|
-| （未参照） | create_FVM.py 内で使用なし | 将来の拡張で使う可能性があるため読み込みのみ実施 |
+| `RaceDistance` | `race_distance_m` の元データ | 文字列混在を数値化し、異常値（例: 5/50）は欠損扱い |
+| `RaceClass` | 距離欠損時の補完キー | `RaceType` 等と組み合わせて最頻値補完 |
+| `RaceType` | 距離欠損時の補完キー | 上記で埋まらない場合のフォールバックにも使用 |
+| `Steady_board` | 距離欠損時の補完キー | 補完用の文脈情報 |
+| `RaceType_bi` | 距離欠損時の補完キー | 補完用の文脈情報 |
 
 ---
 
@@ -89,4 +93,3 @@
 補足:
 - `race_results_df_fix` で `TSC` を枠扱いにして再計算し、`PST` を保持したままマージします。
 - `レースタイム` は `'` や `"` を除去して `float` 化します。
-

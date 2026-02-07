@@ -6,7 +6,7 @@
 ## 必須ファイル
 - `race_class_df_update.pickle`
   - レース区分やグレードなどのマスタ的情報の想定。
-  - ※現行の `create_FVM.py` では読み込みのみで直接利用していません。
+  - `create_FVM.py` では `RaceDistance` を参照し、`race_distance_m` 特徴量の生成に利用します。
 
 - `last_info_df_update_v2.pickle`
   - レース直前情報（気象・展示・選手情報など）。

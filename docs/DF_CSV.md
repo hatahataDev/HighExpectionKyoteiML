@@ -31,6 +31,14 @@
   - `boat_no`, `bwin_r_2`, `bwin_r_3`
   - `piston`, `ring`, `electric`, `carburetor`, `cylinder`, `shafts`, `gears`, `carrier`, `propera`
 
+### 1.5) レースマスタ由来の列
+`race_class_df_update.pickle` から `race_id` で付与されます。
+
+- `race_distance_m`
+  - `RaceDistance` を数値化した距離（m）。
+  - 欠損時は `RaceClass` / `RaceType` / `Steady_board` / `RaceType_bi` の組み合わせ、次いで `RaceType` 単位の最頻値で補完。
+  - `5` や `50` などの異常値は欠損扱い。
+
 ### 2) レース結果由来の列
 `race_results_df_update_v3.pickle`（補正モードの場合は `race_results_df_fix` を通したもの）から来る列です。
 

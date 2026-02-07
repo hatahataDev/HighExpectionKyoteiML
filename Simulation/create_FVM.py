@@ -3,6 +3,7 @@ import pandas as pd
 import random
 import datetime
 import os
+import time
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -46,16 +47,104 @@ def resolve_dataset_dir() -> Path:
     return default_dir
 
 
+PROGRESS_TOTAL_STEPS = 12
+_progress_state = {
+    "step": 0,
+    "start": time.time(),
+    "last": time.time(),
+}
+
+
+def log_progress(message: str, df: pd.DataFrame | None = None) -> None:
+    _progress_state["step"] += 1
+    step = _progress_state["step"]
+    now = time.time()
+    step_elapsed = now - _progress_state["last"]
+    total_elapsed = now - _progress_state["start"]
+    percent = (step / PROGRESS_TOTAL_STEPS) * 100
+    summary = ""
+    if df is not None:
+        summary = f" | rows={len(df):,} cols={len(df.columns):,}"
+    print(
+        f"[PROGRESS {step}/{PROGRESS_TOTAL_STEPS} ({percent:5.1f}%)] {message}"
+        f" (step: {step_elapsed:.1f}s / total: {total_elapsed:.1f}s){summary}",
+        flush=True,
+    )
+    _progress_state["last"] = now
+
+
+def log_detail(message: str, df: pd.DataFrame | None = None) -> None:
+    elapsed = time.time() - _progress_state["start"]
+    summary = ""
+    if df is not None:
+        summary = f" | rows={len(df):,} cols={len(df.columns):,}"
+    print(f"[DETAIL +{elapsed:7.1f}s] {message}{summary}", flush=True)
+
+
 DATA_DIR = resolve_dataset_dir()
 dir_name = str(DATA_DIR) + "/"
 print("create_FVM.py の入力データディレクトリ: {}".format(DATA_DIR))
+log_progress("入力データディレクトリの解決完了")
 
-race_class_df = pd.read_pickle(dir_name + "race_class_df_update.pickle") 
+race_class_df = pd.read_pickle(dir_name + "race_class_df_update.pickle")
+log_progress("race_class_df_update.pickle の読み込み完了", race_class_df)
 last_info_df = pd.read_pickle(dir_name + 'last_info_df_update_v2.pickle')#欠場レースのデータなし．
+log_progress("last_info_df_update_v2.pickle の読み込み完了", last_info_df)
 race_results_df = pd.read_pickle(dir_name+'race_results_df_update_v3.pickle')
+log_progress("race_results_df_update_v3.pickle の読み込み完了", race_results_df)
 
 shutuba_tables_df = pd.read_pickle(dir_name+'shutuba_table_df_update_v2.pickle')#欠場レース有のレースもデータ有り
+log_progress("shutuba_table_df_update_v2.pickle の読み込み完了", shutuba_tables_df)
 #last_info_dfとshutuba_tables_dfとrace_results_dfの共通レースは，1752031(2022/09/07)
+
+
+def _mode_first_non_null(s):
+    s = s.dropna()
+    if s.empty:
+        return np.nan
+    mode = s.mode()
+    if mode.empty:
+        return np.nan
+    return mode.iloc[0]
+
+
+def add_race_distance_feature(data, race_class_df):
+    print("race_distance_m特徴量の作成 開始")
+
+    required_cols = ["RaceDistance", "RaceClass", "RaceType", "Steady_board", "RaceType_bi"]
+    missing_cols = [c for c in required_cols if c not in race_class_df.columns]
+    if missing_cols:
+        raise KeyError(f"race_class_df に必要な列が不足しています: {missing_cols}")
+
+    race_meta = race_class_df[required_cols].copy()
+
+    # RaceDistance は文字列混在（例: "1800", "1200", "５", "５０"）のため数値化する
+    race_meta["race_distance_m"] = pd.to_numeric(
+        race_meta["RaceDistance"].astype(str).str.extract(r"(\d+)")[0],
+        errors="coerce",
+    )
+    # 50m/5m などの明らかな異常値は欠損として扱う
+    race_meta.loc[race_meta["race_distance_m"] < 1000, "race_distance_m"] = np.nan
+
+    known = race_meta[race_meta["race_distance_m"].notna()]
+    if not known.empty:
+        combo_cols = ["RaceClass", "RaceType", "Steady_board", "RaceType_bi"]
+        combo_map = known.groupby(combo_cols)["race_distance_m"].agg(_mode_first_non_null)
+        missing_mask = race_meta["race_distance_m"].isna()
+        combo_fill = race_meta.loc[missing_mask, combo_cols].apply(tuple, axis=1).map(combo_map)
+        race_meta.loc[missing_mask, "race_distance_m"] = combo_fill
+
+        # 上記で埋まらなかったものは RaceType 単位の最頻値で補完
+        still_missing = race_meta["race_distance_m"].isna()
+        if still_missing.any():
+            race_type_map = known.groupby("RaceType")["race_distance_m"].agg(_mode_first_non_null)
+            race_meta.loc[still_missing, "race_distance_m"] = race_meta.loc[still_missing, "RaceType"].map(race_type_map)
+
+    race_ids = data.index.get_level_values(0)
+    data["race_distance_m"] = race_ids.map(race_meta["race_distance_m"])
+    missing_rows = int(data["race_distance_m"].isna().sum())
+    print(f"race_distance_m特徴量の作成 終了 (欠損行: {missing_rows}/{len(data)})")
+    return data
 
 
 def race_results_df_fix(race_results_df_v2):#入力にはrace_results_df_v2.pickle
@@ -91,20 +180,20 @@ def preprocessing(last_info_df, shutuba_tables_df, race_results_df):#
     lace_id_list = last_info_df.index.unique()
 
     #レースIDを持つ出馬表データを取得
-    shutuba_tables_df_ = shutuba_tables_df[shutuba_tables_df.index.isin(lace_id_list)]
-    last_info_df_ = last_info_df[last_info_df.index.isin(shutuba_tables_df_.index)]
-    race_results_df_ = race_results_df[['着','枠', "TSC", "決まり手", "PST", "レースタイム"]]
-    race_results_df_ = race_results_df_[race_results_df_.index.isin(lace_id_list)]
+    shutuba_tables_df_ = shutuba_tables_df[shutuba_tables_df.index.isin(lace_id_list)].copy()
+    last_info_df_ = last_info_df[last_info_df.index.isin(shutuba_tables_df_.index)].copy()
+    race_results_df_ = race_results_df[['着','枠', "TSC", "決まり手", "PST", "レースタイム"]].copy()
+    race_results_df_ = race_results_df_[race_results_df_.index.isin(lace_id_list)].copy()
 #(以下変更2022/11/22)
 #     df = pd.concat([last_info_df_.reset_index(drop = True), shutuba_tables_df_.reset_index()], axis = 1)
 #     df.index = df["index"]
 #     df = df.drop(columns = "index")
 #     df = df.rename_axis(None)
 
-    shutuba_tables_df_["race_id"] = shutuba_tables_df_.index
-    shutuba_tables_df_["merge_id"] = shutuba_tables_df_.groupby(level=0).cumcount()+1
-    last_info_df_["race_id"] = last_info_df_.index
-    last_info_df_["merge_id"] = last_info_df_.groupby(level=0).cumcount()+1
+    shutuba_tables_df_.loc[:, "race_id"] = shutuba_tables_df_.index
+    shutuba_tables_df_.loc[:, "merge_id"] = shutuba_tables_df_.groupby(level=0).cumcount()+1
+    last_info_df_.loc[:, "race_id"] = last_info_df_.index
+    last_info_df_.loc[:, "merge_id"] = last_info_df_.groupby(level=0).cumcount()+1
     df = pd.merge(last_info_df_, shutuba_tables_df_, how = "left",on=["race_id", "merge_id"])
     df.index = df["race_id"]
     df = df.drop(columns = ["race_id", "merge_id"])
@@ -129,8 +218,8 @@ def preprocessing(last_info_df, shutuba_tables_df, race_results_df):#
     
     #df['着'] = df['着'].astype(int)
     
-    race_results_df_['race_id'] = race_results_df_.index
-    race_results_df_['枠'] = race_results_df_['枠'].astype(str)
+    race_results_df_.loc[:, 'race_id'] = race_results_df_.index
+    race_results_df_.loc[:, '枠'] = race_results_df_['枠'].astype(str)
     df_v2 = pd.merge(df, race_results_df_, on=['race_id','枠']) #心配ポイント1
     df_v2['着'] = df_v2['着'].map(lambda x: int(x) if x in ['１','２','３','４','５','６'] else 7)
     df_v2.index = df_v2['race_id']
@@ -138,43 +227,85 @@ def preprocessing(last_info_df, shutuba_tables_df, race_results_df):#
     
     return df_v2
 
-def estimate_fifthsixth_racetime(X):#2023/6/24追加
-    mean_race_time_delta = X["レースタイム_refix"].dropna().astype(int).sort_values().diff().dropna().mean()#レースタイムの着間差分
-    forth_racetime = X["レースタイム_refix"].sort_values().dropna().astype(int).max()#nanを除いた選手のレースタイム最大値
-    
-    if X["レースタイム_refix"].isna().sum() == 0:#全着のレースタイムを計測している場合もあるので，その場合の例外処理
-        return X
-    elif X["レースタイム_refix"].isna().sum() == 1:
-        X.loc[(X["着"] == 6) | (X["着"] == 7), "レースタイム_refix"] = str(forth_racetime + (2*mean_race_time_delta))
-        return X
-    else:
-        X.loc[X["着"] == 5, "レースタイム_refix"] = str(forth_racetime + mean_race_time_delta)
-        X.loc[(X["着"] == 6) | (X["着"] == 7), "レースタイム_refix"] = str(forth_racetime + (2*mean_race_time_delta))
-        return X
+def fill_fifthsixth_racetime_vectorized(df_v2):
+    log_detail("correction_RT_preprocessing: レースタイム補完(ベクトル化) 入力整形 開始")
+    race_time_raw = df_v2["レースタイム_refix"]
+    race_time_numeric = pd.to_numeric(race_time_raw, errors="coerce")
+    invalid_mask = race_time_raw.notna() & race_time_numeric.isna()
+    if invalid_mask.any():
+        sample_values = race_time_raw[invalid_mask].astype(str).head(5).tolist()
+        raise ValueError(f"レースタイム_refix に数値変換不能な値があります: {sample_values}")
+    log_detail("correction_RT_preprocessing: レースタイム補完(ベクトル化) 入力整形 完了")
+
+    log_detail("correction_RT_preprocessing: レースタイム補完(ベクトル化) グループ統計(欠損数/最大値) 開始")
+    race_time_group = race_time_numeric.groupby(level=0, sort=False)
+    missing_count = race_time_numeric.isna().groupby(level=0, sort=False).transform("sum")
+    max_race_time = race_time_group.transform("max")
+    log_detail("correction_RT_preprocessing: レースタイム補完(ベクトル化) グループ統計(欠損数/最大値) 完了")
+
+    log_detail("correction_RT_preprocessing: レースタイム補完(ベクトル化) グループ統計(着間差平均) 開始")
+    known_race_times = race_time_numeric.dropna().sort_values(kind="mergesort")
+    race_time_diffs = known_race_times.groupby(level=0, sort=False).diff()
+    mean_delta_by_race = race_time_diffs.groupby(level=0, sort=False).mean()
+    mean_delta = pd.Series(df_v2.index.map(mean_delta_by_race), index=df_v2.index, dtype="float64")
+    log_detail(
+        "correction_RT_preprocessing: レースタイム補完(ベクトル化) グループ統計(着間差平均) 完了"
+        f" | groups={len(mean_delta_by_race):,}"
+    )
+
+    fill_6_7_when_missing_one = missing_count.eq(1) & df_v2["着"].isin([6, 7])
+    fill_5_when_missing_two_or_more = missing_count.ge(2) & df_v2["着"].eq(5)
+    fill_6_7_when_missing_two_or_more = missing_count.ge(2) & df_v2["着"].isin([6, 7])
+    fill_rows = int(
+        (fill_6_7_when_missing_one | fill_5_when_missing_two_or_more | fill_6_7_when_missing_two_or_more).sum()
+    )
+    log_detail(
+        "correction_RT_preprocessing: レースタイム補完(ベクトル化) 補完対象抽出 完了"
+        f" | fill_rows={fill_rows:,}"
+    )
+
+    race_time_numeric.loc[fill_6_7_when_missing_one] = (
+        max_race_time.loc[fill_6_7_when_missing_one]
+        + (2 * mean_delta.loc[fill_6_7_when_missing_one])
+    )
+    race_time_numeric.loc[fill_5_when_missing_two_or_more] = (
+        max_race_time.loc[fill_5_when_missing_two_or_more]
+        + mean_delta.loc[fill_5_when_missing_two_or_more]
+    )
+    race_time_numeric.loc[fill_6_7_when_missing_two_or_more] = (
+        max_race_time.loc[fill_6_7_when_missing_two_or_more]
+        + (2 * mean_delta.loc[fill_6_7_when_missing_two_or_more])
+    )
+    df_v2["レースタイム_refix"] = race_time_numeric
+    log_detail("correction_RT_preprocessing: レースタイム補完(ベクトル化) 補完値の適用 完了")
+    return df_v2
     
 def correction_RT_preprocessing(last_info_df, shutuba_tables_df, race_results_df):
-    
+    log_detail("correction_RT_preprocessing: 開始")
+
     #学習データのレースIDを取得
     lace_id_list = last_info_df.index.unique()
 
     #レースIDを持つ出馬表データを取得
-    shutuba_tables_df_ = shutuba_tables_df[shutuba_tables_df.index.isin(lace_id_list)]
-    last_info_df_ = last_info_df[last_info_df.index.isin(shutuba_tables_df_.index)]
-    race_results_df_ = race_results_df[['着','枠', "TSC", "決まり手", "PST", "レースタイム"]]
-    race_results_df_ = race_results_df_[race_results_df_.index.isin(lace_id_list)]
+    shutuba_tables_df_ = shutuba_tables_df[shutuba_tables_df.index.isin(lace_id_list)].copy()
+    last_info_df_ = last_info_df[last_info_df.index.isin(shutuba_tables_df_.index)].copy()
+    race_results_df_ = race_results_df[['着','枠', "TSC", "決まり手", "PST", "レースタイム"]].copy()
+    race_results_df_ = race_results_df_[race_results_df_.index.isin(lace_id_list)].copy()
+    log_detail("correction_RT_preprocessing: 入力フィルタ完了")
 #(以下変更2022/11/22)
 #     df = pd.concat([last_info_df_.reset_index(drop = True), shutuba_tables_df_.reset_index()], axis = 1)
 #     df.index = df["index"]
 #     df = df.drop(columns = "index")
 #     df = df.rename_axis(None)
 
-    shutuba_tables_df_["race_id"] = shutuba_tables_df_.index
-    shutuba_tables_df_["merge_id"] = shutuba_tables_df_.groupby(level=0).cumcount()+1
-    last_info_df_["race_id"] = last_info_df_.index
-    last_info_df_["merge_id"] = last_info_df_.groupby(level=0).cumcount()+1
+    shutuba_tables_df_.loc[:, "race_id"] = shutuba_tables_df_.index
+    shutuba_tables_df_.loc[:, "merge_id"] = shutuba_tables_df_.groupby(level=0).cumcount()+1
+    last_info_df_.loc[:, "race_id"] = last_info_df_.index
+    last_info_df_.loc[:, "merge_id"] = last_info_df_.groupby(level=0).cumcount()+1
     df = pd.merge(last_info_df_, shutuba_tables_df_, how = "left",on=["race_id", "merge_id"])
     df.index = df["race_id"]
     df = df.drop(columns = ["race_id", "merge_id"])
+    log_detail("correction_RT_preprocessing: last_info/shutuba マージ完了", df)
 
     df = df[['ET', 'tilt', 'EST', 'ESC', 'date', 'place', 'race_no', 'weather',
        'air_t', 'wind_d', 'wind_v', 'water_t', 'wave_h','枠','F', 'L', 'age', 'weight',
@@ -196,19 +327,23 @@ def correction_RT_preprocessing(last_info_df, shutuba_tables_df, race_results_df
     
     #df['着'] = df['着'].astype(int)
     
-    race_results_df_['race_id'] = race_results_df_.index
-    race_results_df_['枠'] = race_results_df_['枠'].astype(str)
+    race_results_df_.loc[:, 'race_id'] = race_results_df_.index
+    race_results_df_.loc[:, '枠'] = race_results_df_['枠'].astype(str)
     df_v2 = pd.merge(df, race_results_df_, on=['race_id','枠']) #心配ポイント1
     df_v2['着'] = df_v2['着'].map(lambda x: int(x) if x in ['１','２','３','４','５','６'] else 7)
     df_v2.index = df_v2['race_id']
     df_v2.drop(columns = "race_id", inplace = True)
+    log_detail("correction_RT_preprocessing: race_results マージ完了", df_v2)
     
     #2023/6/24追加
     df_v2["レースタイム_refix"] = df_v2["レースタイム"].str.replace("'", "")
     df_v2["レースタイム_refix"] = df_v2["レースタイム_refix"].str.replace("\"", "")
 
-    df_v2 = df_v2.groupby(level = 0).apply(estimate_fifthsixth_racetime)
+    log_detail("correction_RT_preprocessing: レースタイム補完(ベクトル化) 開始")
+    df_v2 = fill_fifthsixth_racetime_vectorized(df_v2)
+    log_detail("correction_RT_preprocessing: レースタイム補完(ベクトル化) 終了", df_v2)
     df_v2["レースタイム_refix"] = df_v2["レースタイム_refix"].astype(float)
+    log_detail("correction_RT_preprocessing: 終了", df_v2)
     
     return df_v2
 
@@ -335,14 +470,24 @@ def calc_recetime_statistics(race_results_df, last_info_df, shutuba_tables_df, r
 
 # 計算時間(18.7[m])
 use_correction = os.environ.get("FVM_USE_CORRECTION", "1") != "0"
+log_progress(f"前処理モード判定: {'補正あり' if use_correction else '補正なし'}")
 if use_correction:
     race_results_df_refix = race_results_df_fix(race_results_df)
     df = correction_RT_preprocessing(last_info_df, shutuba_tables_df, race_results_df_refix)
+    log_progress("補正あり前処理の実行完了", df)
     df["twin_r_1"] = df.swifter.apply(_twin_fix, axis=1)
+    log_progress("twin_r_1 の欠損補正完了", df)
 else:
     df = preprocessing(last_info_df, shutuba_tables_df, race_results_df)
+    log_progress("通常前処理の実行完了", df)
+    log_progress("twin_r_1 の欠損補正はスキップ（補正モード無効）", df)
+df = add_race_distance_feature(df, race_class_df)
+log_progress("race_distance_m 特徴量の付与完了", df)
 df = add_features(df)
+log_progress("add_features の実行完了", df)
 
 
 df = df.droplevel(list(range(1, df.index.nlevels)))#マルチインデックスを削除
+log_progress("マルチインデックスの削除完了", df)
 df.to_csv("data/df.csv")
+log_progress("data/df.csv の保存完了", df)
